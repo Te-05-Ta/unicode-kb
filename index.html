@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Xiao Unicode KB</title>
+<style>
+  body { font-family: sans-serif; padding: 12px; font-size: 18px; margin: 0; }
+  textarea { width: 100%; height: 35vh; font-size: 18px; box-sizing: border-box; }
+  button { font-size: 18px; padding: 12px; margin-top: 8px; border-radius: 8px; border: 1px solid #888; }
+  .wide { width: 100%; }
+  .row { display: flex; gap: 8px; }
+  .row button { flex: 1; }
+  #status { color: #555; font-size: 15px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<button id="connect" class="wide">① XIAO に接続</button>
+<textarea id="text" placeholder="ここに入力"></textarea>
+<button id="send" class="wide" disabled>② 送信(Unicode)</button>
+<div class="row">
+  <button id="bs" disabled>⌫ BS</button>
+  <button id="enter" disabled>⏎ Enter</button>
+  <button id="left" disabled>←</button>
+  <button id="right" disabled>→</button>
+</div>
+<p id="status">未接続</p>
+
+<script>
+// アプリ・XIAO と同じ UUID(Nordic UART Service)
+const SERVICE_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
+const CHAR_UUID    = "6e400002-b5a3-f393-e0a9-e50e24dcca9e";
+const INTERVAL_MS  = 250;   // 1文字ごとの間隔(アプリは200ms。少し余裕を持たせています)
+const CHUNK        = 20;    // 1回に送る最大バイト数
+
+let ch = null;
+let queue = Promise.resolve();   // 送信を順番に処理するための列
+let pending = 0;
+const $ = id => document.getElementById(id);
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const btns = ["send", "bs", "enter", "left", "right"];
+
+function setEnabled(on) { btns.forEach(id => $(id).disabled = !on); }
+function status(msg) { $("status").textContent = msg; }
+
+$("connect").onclick = async () => {
+  if (!navigator.bluetooth) {
+    status("このブラウザは Bluetooth に対応していません。\nBluefy で開いてください。");
+    return;
+  }
+  try {
+    const dev = await navigator.bluetooth.requestDevice({
+      filters: [{ services: [SERVICE_UUID] }, { namePrefix: "Xiao" }],
+      optionalServices: [SERVICE_UUID]
+    });
+    dev.addEventListener("gattserverdisconnected", () => {
+      ch = null; setEnabled(false); status("切断されました。①から接続し直してください");
+    });
+    status("接続中…");
+    const server = await dev.gatt.connect();
+    const svc = await server.getPrimaryService(SERVICE_UUID);
+    ch = await svc.getCharacteristic(CHAR_UUID);
+    setEnabled(true);
+    status("接続しました: " + (dev.name || "Xiao"));
+  } catch (e) {
+    status("接続失敗: " + e.message);
+  }
+};
+
+// 文字列を UTF-8 にして XIAO へ書き込む
+async function writeRaw(str) {
+  const bytes = new TextEncoder().encode(str);
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    await ch.writeValue(bytes.slice(i, i + CHUNK));
+  }
+}
+
+// 送信を順番待ちに入れる(前の送信が終わるまで次を送らない)
+function enqueue(str, waitMs) {
+  pending++;
+  queue = queue.then(async () => {
+    if (!ch) return;
+    try {
+      await writeRaw(str);
+      await sleep(waitMs);
+    } catch (e) {
+      status("送信失敗: " + e.message);
+    } finally {
+      pending--;
+      if (pending === 0 && ch) status("送信完了");
+      else if (ch) status("送信中… 残り " + pending);
+    }
+  });
+}
+
+// アプリの sendUnicode と同じ形式: "U+XXXX  \n"
+$("send").onclick = () => {
+  const text = $("text").value;
+  if (!text) return;
+  for (const c of text) {   // 絵文字などもまとめて1文字として扱う
+    const hex = c.codePointAt(0).toString(16).toUpperCase().padStart(4, "0");
+    enqueue("U+" + hex + "  \n", INTERVAL_MS);
+  }
+  $("text").value = "";
+};
+
+$("bs").onclick    = () => enqueue("\b", 50);
+$("enter").onclick = () => enqueue("\n", 50);
+$("left").onclick  = () => enqueue("CMD:KEY:LEFT\n", 50);
+$("right").onclick = () => enqueue("CMD:KEY:RIGHT\n", 50);
+</script>
+</body>
+</html>
